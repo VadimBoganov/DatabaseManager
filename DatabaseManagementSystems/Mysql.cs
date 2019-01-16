@@ -151,7 +151,5 @@ namespace DatabaseManager.DatabaseManagementSystems
                 command.ExecuteNonQuery();
             }
         }
-
-
     }
 }
