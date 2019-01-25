@@ -4,6 +4,7 @@ using System.Linq;
 using MySql.Data.MySqlClient;
 using System.Reflection;
 using System.Threading.Tasks;
+using System.Threading;
 
 namespace DatabaseManager.DatabaseManagementSystems
 {
@@ -24,31 +25,23 @@ namespace DatabaseManager.DatabaseManagementSystems
                     Port = (uint)connection.Port,
                     UserID = connection.User,
                     Password = connection.Password,
-                    SslMode = MySqlSslMode.None
+                    SslMode = MySqlSslMode.None,
+                    Database = connection.DatabaseName
                 };
 
                 MySqlConnection conn = CreateConnection(connectionStringBuilder);
 
-                // можно было в action указывать имя БД, но для одной БД может быть несколько action, что удобно при настройке
-                // так же можно доработать конфиг - указать кодировку
-                foreach(var db in connection.Databases)
+                foreach(var action in connection.Actions)
                 {
-                    conn.ChangeDatabase(db.Name);
-
-                    foreach(var action in db.Actions)
-                    {
-                        Type thisType = this.GetType();
-                        MethodInfo theMethod = thisType.GetMethod(action.Name);
-                        Task task = Task.Factory.StartNew(() =>
-                            theMethod.Invoke(this, new object[] {db, action, conn})
-                        );
-                        tasks.Add(task);
-                    }
+                    Type thisType = this.GetType();
+                    MethodInfo theMethod = thisType.GetMethod(action.Name);
+                    Task task = Task.Factory.StartNew(() =>
+                        theMethod.Invoke(this, new object[] { action, conn })
+                    );
+                    tasks.Add(task);
                 }
-                Task.WaitAll(tasks.ToArray());
-
-                conn.Close();
             }
+            Task.WaitAll(tasks.ToArray());
         }
 
         public MySqlConnection CreateConnection(MySqlConnectionStringBuilder connectionStringBuilder)
@@ -67,13 +60,13 @@ namespace DatabaseManager.DatabaseManagementSystems
             }
         }
 
-        public void Delete(Database db, TableAction action, MySqlConnection conn)
+        public void Delete(TableAction action, MySqlConnection conn)
         {
             const int ONEFULLDAY = 24;
 
             try
             {
-                DateTime firstMessageTime = GetFirstMessageTime(db, action, conn);
+                DateTime firstMessageTime = GetFirstMessageTime(action, conn);
 
                 //получение разницы в часах между текущим временем и полученым из БД
                 TimeSpan ts = DateTime.Now - firstMessageTime;
@@ -85,8 +78,8 @@ namespace DatabaseManager.DatabaseManagementSystems
                 while (intervalTime > limitHours)
                 {
                     intervalTime -= Convert.ToDouble(action.IntervalHours);
-                    var querystring = String.Format(@"DELETE t1 FROM {0}.{1} t1 INNER JOIN (SELECT `key` FROM {0}.{1} WHERE timeUtc < DATE_SUB(NOW(), INTERVAL {2} HOUR) ORDER BY `key`) t2 USING(`key`)",
-                        db.Name, action.TableName, intervalTime);
+                    var querystring = String.Format(@"DELETE t1 FROM {0} t1 INNER JOIN (SELECT `key` FROM {0} WHERE timeUtc < DATE_SUB(NOW(), INTERVAL {1} HOUR) ORDER BY `key`) t2 USING(`key`)",
+                       action.TableName, intervalTime);
 
                     using (MySqlCommand command = new MySqlCommand(querystring, conn))
                     {
@@ -94,11 +87,13 @@ namespace DatabaseManager.DatabaseManagementSystems
                         command.ExecuteNonQuery();
                     }
                 }
-                ConsoleLogger.Write(LogStatus.Info, "Deleted from " + db.Name + " gps_mes_archive in " + DateTime.Now.ToString());
+                ConsoleLogger.Write(LogStatus.Info, "Deleted from " + conn.Database  + " gps_mes_archive in " + DateTime.Now.ToString());
 
-                OptimizeTable(db, action, conn);
+                ConsoleLogger.Write(LogStatus.Info, "Start optimize " + conn.Database);
+                OptimizeTable(action, conn);
                 ConsoleLogger.Write(LogStatus.Info, "Optimized table " + action.TableName);
 
+                conn.Close();
             }
             catch(Exception ex)
             {
@@ -106,21 +101,12 @@ namespace DatabaseManager.DatabaseManagementSystems
             }
         }
 
-        public void OptimizeTable(Database db, TableAction action, MySqlConnection conn)
-        {
-            using(MySqlCommand command = new MySqlCommand(String.Format(@"OPTIMIZE TABLE {0}.{1}",db.Name, action.TableName), conn))
-            {
-                command.CommandTimeout = action.Timeout;
-                command.ExecuteNonQuery();
-            }
-        }
-
-        public DateTime GetFirstMessageTime(Database db, TableAction action, MySqlConnection conn)
+        public DateTime GetFirstMessageTime(TableAction action, MySqlConnection conn)
         {
             DateTime firstMessageTime = DateTime.MinValue;
 
-            using (MySqlCommand command = new MySqlCommand(String.Format(@"SELECT timeUtc FROM {0}.{1} ORDER BY `key` LIMIT 1",
-                db.Name, action.TableName), conn))
+            using (MySqlCommand command = new MySqlCommand(String.Format(@"SELECT timeUtc FROM {0} ORDER BY `key` LIMIT 1",
+                action.TableName), conn))
             {
                 command.CommandTimeout = Convert.ToInt16(action.Timeout);
                 using (MySqlDataReader reader = command.ExecuteReader())
@@ -132,20 +118,29 @@ namespace DatabaseManager.DatabaseManagementSystems
 
                     if(firstMessageTime > DateTime.Now.Date.AddDays(1))
                     {
-                        ClearInvalidMessages(db, action, conn);
-                        firstMessageTime = GetFirstMessageTime(db, action, conn);
+                        ClearInvalidMessages(action, conn);
+                        firstMessageTime = GetFirstMessageTime(action, conn);
                     }
 
-                    ConsoleLogger.Write(LogStatus.Info, "First time in " + db.Name + "= " + firstMessageTime);
+                    ConsoleLogger.Write(LogStatus.Info, "First time in " + conn.Database + "= " + firstMessageTime);
                     return firstMessageTime;
                 }
             }
         }
 
-        void ClearInvalidMessages(Database db, TableAction action, MySqlConnection conn)
+        public void OptimizeTable(TableAction action, MySqlConnection conn)
         {
-            using (MySqlCommand command = new MySqlCommand(String.Format(@"DELETE FROM {0}.{1} WHERE timeUtc > DATE(NOW()) + INTERVAL 1 DAY - INTERVAL 1 SECOND",
-                db.Name, action.TableName), conn))
+            using(MySqlCommand command = new MySqlCommand(String.Format(@"OPTIMIZE TABLE {0}", action.TableName), conn))
+            {
+                command.CommandTimeout = int.MaxValue;
+                command.ExecuteNonQuery();
+            }
+        }
+
+        public void ClearInvalidMessages(TableAction action, MySqlConnection conn)
+        {
+            using (MySqlCommand command = new MySqlCommand(String.Format(@"DELETE FROM {0} WHERE timeUtc > DATE(NOW()) + INTERVAL 1 DAY - INTERVAL 1 SECOND",
+                 action.TableName), conn))
             {
                 command.CommandTimeout = Convert.ToInt16(action.Timeout);
                 command.ExecuteNonQuery();

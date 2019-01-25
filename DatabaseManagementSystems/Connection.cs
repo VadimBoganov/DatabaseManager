@@ -10,7 +10,8 @@ namespace DatabaseManager.DatabaseManagementSystems
         public int Port{get;set;}
         public string User{get;set;}
         public string Password{get;set;}
-        public List<Database> Databases{get;set;}
+        public string DatabaseName{get;set;}
+        public List<TableAction> Actions{get;set;}
 
     }
 }
