@@ -14,10 +14,6 @@ namespace DatabaseManager
                 Deserializer deserializer = new Deserializer("config.xml");
                 var systems = deserializer.Deserialize<List<IDatabaseManagementSystem>>();
 
-                // foreach(var system in systems)
-                //     system.DoActions();
-
-
                 while(true)
                 {
                     try
